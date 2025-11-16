@@ -4,6 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { Subject, debounceTime } from 'rxjs';
 import { MetadataService, AppObject, Field } from '../services/metadata.service';
 import { SqlParserService } from '../services/sql-parser.service';
+import { SqlValidationService, SqlValidationResult } from '../services/sql-validation.service';
 import { QueryExecutionService, QueryExecutionResponse } from '../services/query-execution.service';
 import { ToastService } from '../services/toast.service';
 import { QueryManagementService, SavedQuery, QueryHistory } from '../services/query-management.service';
@@ -18,6 +19,7 @@ import { SplitterModule } from '@syncfusion/ej2-angular-layouts';
 // Import SQL language support
 import * as monacoSqlLanguages from 'monaco-sql-languages';
 import { format } from 'sql-formatter';
+import { Parser } from 'node-sql-parser';
 
 interface QueryParameter {
   name: string;
@@ -84,14 +86,23 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
   
   private queryChangeSubject = new Subject<string>();
   private schemaData: { appObjects: AppObject[] } | null = null;
-  
+
+  private sqlParser: Parser;
+
   constructor(
+    private elementRef: ElementRef,
     private metadataService: MetadataService,
     private sqlParserService: SqlParserService,
     private queryExecutionService: QueryExecutionService,
     private toastService: ToastService,
-    private queryManagementService: QueryManagementService
-  ) {}
+    private queryManagementService: QueryManagementService,
+    private sqlValidationService: SqlValidationService
+  ) {
+    // Initialize node-sql-parser
+    // Note: node-sql-parser has limited SQL Server support, so we use generic parser
+    // and catch errors only for true syntax errors
+    this.sqlParser = new Parser();
+  }
 
   ngOnInit(): void {
     // Initialize with sample query
@@ -516,10 +527,8 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
     }
     
     this.detectParameters();
-    this.hasValidationErrors = false;
-    this.validationErrors = [];
-    this.showValidationErrors = false;
-    this.validationSuccess = false;
+    // Don't clear validation errors here - let validation run and update them
+    // The validation will be triggered by queryChangeSubject and will update hasValidationErrors
     this.queryChangeSubject.next(this.sqlQuery);
   }
 
@@ -555,40 +564,823 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
   validateQuery(query: string): void {
     this.validationErrors = [];
     
+    // Clear existing markers
+    this.clearValidationMarkers();
+    
     // Basic validation
     if (!query.trim()) {
       this.hasValidationErrors = false;
       this.validationErrors = [];
+      this.showValidationErrors = false;
+      this.validationSuccess = false;
       return;
     }
 
-    try {
-      // Validate SQL syntax structure
-      this.validateSqlStructure(query);
-      
-      // Validate using parser service
-      try {
-        const parsedQuery = this.sqlParserService.parseQuery(query);
-        this.validateParsedQuery(query, parsedQuery);
-      } catch (parseError: any) {
-        this.validationErrors.push({
-          message: `SQL Parse Error: ${parseError.message || 'Failed to parse query'}`,
-          severity: 'error'
-        });
-      }
-      
-      // Validate against schema if available
-      if (this.schemaData) {
-        this.validateAgainstSchema(query);
-      }
-    } catch (error: any) {
-      this.validationErrors.push({
-        message: `Validation Error: ${error.message || 'Unknown validation error'}`,
-        severity: 'error'
-      });
-    }
+    // Only use node-sql-parser for SQL syntax validation (SQL Server style errors)
+    // All custom error validations removed - only using parser-based syntax checking
+    this.validateSqlSyntaxWithParser(query);
     
     this.hasValidationErrors = this.validationErrors.length > 0;
+    
+    // Show validation errors panel if there are errors
+    if (this.hasValidationErrors) {
+      this.showValidationErrors = true;
+      this.validationSuccess = false;
+    } else {
+      this.showValidationErrors = false;
+      this.validationSuccess = true;
+    }
+    
+    // Update Monaco editor markers to show errors in red
+    this.updateValidationMarkers();
+  }
+
+  /**
+   * Validate SQL syntax using ONLY node-sql-parser
+   * Note: node-sql-parser has limited SQL Server support, so we're lenient with errors
+   */
+  private validateSqlSyntaxWithParser(query: string): void {
+    // Remove comments for validation (but keep them in original for line mapping)
+    const queryWithoutComments = query
+      .replace(/--.*$/gm, '') // Remove single-line comments
+      .replace(/\/\*[\s\S]*?\*\//g, '') // Remove multi-line comments
+      .trim();
+    
+    if (!queryWithoutComments) {
+      return; // Skip validation if query is empty after removing comments
+    }
+
+    // Use ONLY node-sql-parser to validate SQL syntax
+    // Note: node-sql-parser doesn't fully support SQL Server syntax (like TOP, WITH, etc.)
+    // So we catch errors but only report them if they seem like real syntax errors
+    try {
+      // Try to parse the query - if it succeeds, syntax is valid
+      const ast = this.sqlParser.astify(queryWithoutComments);
+      // If parsing succeeds, syntax is valid - no errors
+    } catch (error: any) {
+      const errorMessage = error.message || '';
+      
+      // Check if error is related to SQL Server-specific syntax that parser doesn't support well
+      // Common SQL Server features that node-sql-parser may flag as errors:
+      // - TOP n (e.g., SELECT TOP 8) - parser doesn't support this
+      // - WITH clauses
+      // - SQL Server-specific functions
+      
+      // Check if query contains SQL Server-specific syntax
+      const hasTopSyntax = /\bselect\s+top\s+\d+/i.test(queryWithoutComments);
+      const hasWithSyntax = /\bwith\s+\(/i.test(queryWithoutComments);
+      const hasSqlServerFeatures = hasTopSyntax || hasWithSyntax;
+      
+      // Check if the error message indicates it's complaining about numbers after TOP
+      // Common error pattern: "Expected ... but "8" found" or similar
+      const errorComplainsAboutNumber = 
+        errorMessage.includes('but') && 
+        errorMessage.match(/but\s+["']?\d+["']?/i);
+      
+      const errorComplainsAboutTop = 
+        errorMessage.toLowerCase().includes('top') ||
+        (errorComplainsAboutNumber && hasTopSyntax);
+      
+      // If query contains SQL Server-specific syntax (like TOP 8),
+      // and the error is complaining about it, skip the error as false positive
+      if (hasSqlServerFeatures && (errorComplainsAboutTop || errorComplainsAboutNumber)) {
+        // This is a false positive - node-sql-parser doesn't support SQL Server TOP syntax
+        // Don't report this error
+        return;
+      }
+      
+      // Also check for other common SQL Server syntax that causes false positives
+      if (hasTopSyntax && (
+        errorMessage.toLowerCase().includes('expected') ||
+        errorMessage.toLowerCase().includes('unexpected') ||
+        errorMessage.toLowerCase().includes('but') ||
+        errorMessage.toLowerCase().includes('found')
+      )) {
+        // Likely complaining about TOP syntax - skip it
+        return;
+      }
+      
+      // Parser error occurred - extract error information
+      this.handleParserError(error, query, queryWithoutComments);
+    }
+  }
+
+  /**
+   * Handle parser errors from node-sql-parser
+   * Uses parser's error message but makes it more readable
+   */
+  private handleParserError(error: any, originalQuery: string, queryWithoutComments: string): void {
+    let errorMessage = error.message || 'Unknown syntax error';
+    
+    // Try to extract line and column from error object (from parser)
+    let lineNumber = 1;
+    let columnNumber = 1;
+    
+    // Check if error has location information from parser
+    if (error.location) {
+      lineNumber = error.location.line || error.location.lineNumber || 1;
+      columnNumber = error.location.column || error.location.columnNumber || 1;
+    } else if (error.line !== undefined) {
+      lineNumber = error.line;
+      columnNumber = error.column || 1;
+    } else {
+      // Try to extract from error message (parser might include it)
+      const lineMatch = errorMessage.match(/line\s*(\d+)/i) || 
+                       errorMessage.match(/at\s+line\s*(\d+)/i) ||
+                       errorMessage.match(/position\s*(\d+)/i);
+      if (lineMatch) {
+        lineNumber = parseInt(lineMatch[1], 10);
+      }
+      
+      const colMatch = errorMessage.match(/column\s*(\d+)/i) || 
+                      errorMessage.match(/position\s*\d+.*?(\d+)/i);
+      if (colMatch) {
+        columnNumber = parseInt(colMatch[1], 10);
+      }
+    }
+
+    // Map line number from queryWithoutComments to originalQuery
+    const originalLines = originalQuery.split('\n');
+    let mappedLineNumber = lineNumber;
+    
+    // If we have the line number, map it to original query
+    if (lineNumber > 0 && lineNumber <= originalLines.length) {
+      mappedLineNumber = lineNumber;
+    }
+
+    // Try to extract token from error message to make it clearer
+    // Pattern: "but 'X' found" or "but "X" found" - extract the token
+    const tokenMatch = errorMessage.match(/but\s+["']?([^"'[\]]+)["']?\s+found/i);
+    let nearToken = '';
+    
+    // Collect a canonical list of SQL keywords for dynamic suggestion
+    const keywordSet = this.getSqlKeywords();
+    const keywords = Array.from(keywordSet);
+    
+    // Extract the error line content
+    const currentLineText = mappedLineNumber > 0 && mappedLineNumber <= originalLines.length
+      ? originalLines[mappedLineNumber - 1]
+      : '';
+    
+    if (tokenMatch && tokenMatch[1]) {
+      nearToken = tokenMatch[1].trim();
+    }
+    
+    // Build candidate list of non-keyword words on the line with distance to closest keyword
+    const wordRegex = /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
+    const candidates: Array<{ word: string; index: number; suggestionDist: number }> = [];
+    if (currentLineText) {
+      let m: RegExpExecArray | null;
+      while ((m = wordRegex.exec(currentLineText)) !== null) {
+        const w = m[0];
+        const idx = m.index;
+        const upper = w.toUpperCase();
+        if (keywordSet.has(upper)) continue; // skip valid keywords entirely
+        let bestDist = Number.POSITIVE_INFINITY;
+        for (const kw of keywords) {
+          const d = this.levenshteinDistance(upper, kw);
+          if (d < bestDist) bestDist = d;
+          if (bestDist === 0) break;
+        }
+        candidates.push({ word: w, index: idx, suggestionDist: bestDist });
+      }
+      candidates.sort((a, b) => (a.suggestionDist - b.suggestionDist) || (a.index - b.index));
+    }
+    
+    // If parser gave a token that is a keyword or unclear (single char), prefer the best non-keyword candidate
+    const parserTokenIsWeak = !nearToken || nearToken.length < 2 || keywordSet.has(nearToken.toUpperCase());
+    if (parserTokenIsWeak) {
+      let chosenWord: string | null = null;
+      let chosenIndex = -1;
+      let chosenLine = mappedLineNumber;
+      
+      const localBest = candidates.length > 0 ? (candidates.find(c => c.suggestionDist <= 2) || candidates[0]) : null;
+      if (localBest) {
+        chosenWord = localBest.word;
+        chosenIndex = localBest.index;
+      } else {
+        // Fallback: scan entire query for best non-keyword typo near a keyword (dynamic, not hardcoded)
+        let globalBest: { word: string; line: number; index: number; dist: number } | null = null;
+        for (let li = 0; li < originalLines.length; li++) {
+          const lineText = originalLines[li];
+          if (!lineText) continue;
+          let gm: RegExpExecArray | null;
+          wordRegex.lastIndex = 0;
+          while ((gm = wordRegex.exec(lineText)) !== null) {
+            const w = gm[0];
+            const idx = gm.index;
+            const upper = w.toUpperCase();
+            if (keywordSet.has(upper)) continue;
+            // compute closest keyword distance
+            let bestDist = Number.POSITIVE_INFINITY;
+            for (const kw of keywords) {
+              const d = this.levenshteinDistance(upper, kw);
+              if (d < bestDist) bestDist = d;
+              if (bestDist === 0) break;
+            }
+            if (!globalBest || bestDist < globalBest.dist || (bestDist === globalBest.dist && (li + 1) < globalBest.line)) {
+              globalBest = { word: w, line: li + 1, index: idx, dist: bestDist };
+            }
+          }
+        }
+        if (globalBest) {
+          chosenWord = globalBest.word;
+          chosenIndex = globalBest.index;
+          chosenLine = globalBest.line;
+        }
+      }
+      
+      if (chosenWord !== null && chosenIndex >= 0) {
+        nearToken = chosenWord;
+        columnNumber = chosenIndex + 1;
+        mappedLineNumber = chosenLine;
+      }
+    }
+    
+    // If nearToken still empty, try word at reported column
+    if (!nearToken) {
+      const inferred = this.getWordAtPosition(currentLineText, Math.max(1, columnNumber));
+      if (inferred) {
+        nearToken = inferred.word;
+        columnNumber = inferred.startColumn;
+      }
+    } else {
+      // Align column to nearToken position in the line
+      const idx = currentLineText.toUpperCase().indexOf(nearToken.toUpperCase());
+      if (idx !== -1) {
+        columnNumber = idx + 1;
+      }
+    }
+    
+    // Always show a precise, non-suggestive message and underline the exact token
+    if (nearToken) {
+      errorMessage = `Incorrect syntax near '${nearToken}'.`;
+    }
+
+    // Use the improved error message
+    this.validationErrors.push({
+      message: errorMessage,
+      line: mappedLineNumber,
+      column: columnNumber > 0 ? columnNumber : undefined,
+      severity: 'error'
+    });
+  }
+
+  /**
+   * Get line number from character index in query
+   */
+  private getLineNumber(query: string, index: number): number {
+    const lines = query.substring(0, index).split('\n');
+    return lines.length;
+  }
+
+  /**
+   * Get column number from character index in query
+   * Returns the column position within the line (1-based)
+   */
+  private getColumnNumber(query: string, index: number, lineNumber: number): number {
+    const lines = query.split('\n');
+    if (lineNumber <= 0 || lineNumber > lines.length) {
+      return 1;
+    }
+    
+    // Calculate total characters before this line
+    let charCount = 0;
+    for (let i = 0; i < lineNumber - 1; i++) {
+      charCount += lines[i].length + 1; // +1 for newline character
+    }
+    
+    // Column is the position within the line (1-based in Monaco)
+    const column = index - charCount + 1;
+    
+    // Ensure column is at least 1 and doesn't exceed line length
+    return Math.max(1, Math.min(column, lines[lineNumber - 1].length + 1));
+  }
+
+  /**
+   * Find the index of a word in the query
+   */
+  private findWordIndex(query: string, word: string): number {
+    // Find word with word boundaries
+    const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\b`, 'i');
+    const match = query.match(regex);
+    return match && match.index !== undefined ? match.index : -1;
+  }
+  
+  /**
+   * Dynamically get SQL keywords (canonical, UPPERCASE)
+   */
+  private getSqlKeywords(): Set<string> {
+    return new Set([
+      'SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET',
+      'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'CROSS', 'ON',
+      'DISTINCT', 'TOP', 'AS', 'AND', 'OR', 'NOT', 'IN', 'LIKE', 'BETWEEN', 'IS', 'NULL',
+      'UNION', 'ALL', 'EXISTS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END', 'ASC', 'DESC',
+      'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE',
+      'WITH', 'NOLOCK', 'EXCEPT', 'INTERSECT', 'MINUS', 'WINDOW', 'OVER', 'PARTITION'
+    ]);
+  }
+  
+  /**
+   * Get the word at/near a 1-based column in a line and its start column
+   */
+  private getWordAtPosition(line: string, column1Based: number): { word: string; startColumn: number } | null {
+    if (!line) return null;
+    const idx = Math.max(0, Math.min(line.length, column1Based - 1));
+    const isWordChar = (c: string) => /[A-Za-z0-9_]/.test(c);
+    let start = idx;
+    let end = idx;
+    while (start > 0 && isWordChar(line[start - 1])) start--;
+    while (end < line.length && isWordChar(line[end])) end++;
+    if (start === end) {
+      // Look left for the nearest word if we're on whitespace
+      let i = start - 1;
+      while (i >= 0 && !isWordChar(line[i])) i--;
+      if (i >= 0) {
+        let s = i;
+        while (s >= 0 && isWordChar(line[s])) s--;
+        start = s + 1;
+        end = i + 1;
+      }
+    }
+    const token = line.substring(start, end);
+    if (!token) return null;
+    return { word: token, startColumn: start + 1 };
+  }
+  
+  /**
+   * Compute Levenshtein distance between two strings
+   */
+  private levenshteinDistance(a: string, b: string): number {
+    const m = a.length;
+    const n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+        dp[i][j] = Math.min(
+          dp[i - 1][j] + 1,      // deletion
+          dp[i][j - 1] + 1,      // insertion
+          dp[i - 1][j - 1] + cost // substitution
+        );
+      }
+    }
+    return dp[m][n];
+  }
+
+  /**
+   * Validate WHERE clause for incomplete conditions
+   * Detects cases like: WHERE field (missing operator/value)
+   * Error: Msg 4145, Level 15, State 1, Line X
+   *        An expression of non-boolean type specified in a context where a condition is expected, near 'field'.
+   * @returns true if error found, false otherwise
+   */
+  private validateWhereClause(queryWithoutComments: string, originalQuery: string): boolean {
+    // Find WHERE clause in ORIGINAL query to get correct line numbers
+    const whereMatchOriginal = originalQuery.match(/\bWHERE\b/i);
+    if (!whereMatchOriginal || whereMatchOriginal.index === undefined) {
+      return false; // No WHERE clause, skip validation
+    }
+
+    // Also find in queryWithoutComments for validation logic
+    const whereMatch = queryWithoutComments.match(/\bWHERE\b/i);
+    if (!whereMatch || whereMatch.index === undefined) {
+      return false;
+    }
+
+    // Use original query position for line number calculation
+    const whereIndexOriginal = whereMatchOriginal.index + whereMatchOriginal[0].length;
+    const afterWhereOriginal = originalQuery.substring(whereIndexOriginal).trim();
+    
+    // Use queryWithoutComments for validation logic
+    const whereIndex = whereMatch.index + whereMatch[0].length;
+    const afterWhere = queryWithoutComments.substring(whereIndex).trim();
+    
+    if (!afterWhere) {
+      // WHERE clause with nothing after it
+      const errorLine = this.getLineNumber(originalQuery, whereIndexOriginal);
+      this.validationErrors.push({
+        message: `Msg 4145, Level 15, State 1, Line ${errorLine}\nAn expression of non-boolean type specified in a context where a condition is expected, near 'WHERE'.`,
+        line: errorLine,
+        severity: 'error'
+      });
+      return true;
+    }
+
+    // Extract just the WHERE clause (before GROUP BY, ORDER BY, HAVING, LIMIT, etc.)
+    const whereClauseMatch = afterWhere.match(/^(.+?)(?:\s+(?:GROUP\s+BY|ORDER\s+BY|HAVING|LIMIT|OFFSET|UNION|;)|;|\s*$)/is);
+    let whereClauseText = whereClauseMatch ? whereClauseMatch[1].trim() : afterWhere.trim();
+    
+    // Remove trailing semicolon if present
+    whereClauseText = whereClauseText.replace(/;+$/, '').trim();
+    
+    if (!whereClauseText) {
+      const errorLine = this.getLineNumber(originalQuery, whereIndexOriginal);
+      this.validationErrors.push({
+        message: `Msg 4145, Level 15, State 1, Line ${errorLine}\nAn expression of non-boolean type specified in a context where a condition is expected, near 'WHERE'.`,
+        line: errorLine,
+        severity: 'error'
+      });
+      return true;
+    }
+
+    // SQL operators that create boolean conditions
+    const operators = ['=', '!=', '<>', '>', '<', '>=', '<=', 'LIKE', 'NOT LIKE', 'IN', 'NOT IN', 'IS', 'IS NOT', 'BETWEEN', 'NOT BETWEEN', 'EXISTS', 'NOT EXISTS'];
+    const upperWhere = whereClauseText.toUpperCase();
+    
+    // First, check for incomplete operators (operator without value after it)
+    // Pattern: field = (missing value after =)
+    // Check if WHERE clause ends with an operator
+    const operatorAtEndPatterns = [
+      { pattern: /\s+=\s*$/i, operator: '=' },
+      { pattern: /\s+!=\s*$/i, operator: '!=' },
+      { pattern: /\s+<>\s*$/i, operator: '<>' },
+      { pattern: /\s+>\s*$/i, operator: '>' },
+      { pattern: /\s+<\s*$/i, operator: '<' },
+      { pattern: /\s+>=\s*$/i, operator: '>=' },
+      { pattern: /\s+<=\s*$/i, operator: '<=' },
+      { pattern: /\s+LIKE\s*$/i, operator: 'LIKE' },
+      { pattern: /\s+NOT\s+LIKE\s*$/i, operator: 'NOT LIKE' },
+      { pattern: /\s+IS\s+(NOT\s+)?$/i, operator: 'IS' },
+      { pattern: /\s+IN\s*\(\s*$/i, operator: 'IN' }, // IN with opening paren but no value
+      { pattern: /\s+NOT\s+IN\s*\(\s*$/i, operator: 'NOT IN' },
+      { pattern: /\s+BETWEEN\s+[\w.]+?\s+AND\s*$/i, operator: 'AND' }, // BETWEEN value AND (missing second value)
+    ];
+    
+    for (const { pattern, operator } of operatorAtEndPatterns) {
+      const match = whereClauseText.match(pattern);
+      if (match && match.index !== undefined) {
+        // Operator found at the end - incomplete condition
+        // Find this operator in the original query to get correct line number
+        const operatorInOriginal = this.findOperatorInOriginalQuery(originalQuery, whereIndexOriginal, operator);
+        const errorLine = operatorInOriginal.line;
+        const errorColumn = operatorInOriginal.column;
+        
+        this.validationErrors.push({
+          message: `Msg 102, Level 15, State 1, Line ${errorLine}\nIncorrect syntax near '${operator}'.`,
+          line: errorLine,
+          column: errorColumn,
+          severity: 'error'
+        });
+        return true;
+      }
+    }
+    
+    // Check for operators followed by nothing or just whitespace/punctuation
+    // More general check for incomplete conditions
+    const incompleteOperatorPattern = /\s+([=!<>]+|>=|<=|LIKE|NOT\s+LIKE|IS(?:\s+NOT)?|IN|NOT\s+IN|BETWEEN)\s*[,\s;]*$/i;
+    const incompleteMatch = whereClauseText.match(incompleteOperatorPattern);
+    if (incompleteMatch) {
+      const operator = incompleteMatch[1].trim();
+      // Find this operator in the original query to get correct line number
+      const operatorInOriginal = this.findOperatorInOriginalQuery(originalQuery, whereIndexOriginal, operator);
+      const errorLine = operatorInOriginal.line;
+      const errorColumn = operatorInOriginal.column;
+      
+      this.validationErrors.push({
+        message: `Msg 102, Level 15, State 1, Line ${errorLine}\nIncorrect syntax near '${operator}'.`,
+        line: errorLine,
+        column: errorColumn,
+        severity: 'error'
+      });
+      return true;
+    }
+    
+    // Check if WHERE clause ends with just an identifier (field name) without operator
+    // Simple check: if the last meaningful token is just an identifier (no operator in the clause)
+    const words = whereClauseText.split(/\s+/).filter(w => w && w.trim());
+    
+    if (words.length === 0) {
+      return false;
+    }
+    
+    // Get the last word/token
+    const lastToken = words[words.length - 1].replace(/[.,;]/g, '').trim();
+    
+    // Check if last token is a valid identifier (field name) - pattern: table.field or field
+    if (/^[\w.]+$/.test(lastToken)) {
+      // Check if it's a boolean keyword (AND/OR/NOT) - this is valid but incomplete
+      if (['AND', 'OR', 'NOT'].includes(lastToken.toUpperCase())) {
+        // This would be valid if followed by another condition, but we're checking the end
+        // For now, we'll let the parser catch this
+        return false;
+      }
+      
+      // Check if the entire WHERE clause is just an identifier (e.g., "WHERE a.ID")
+      // This is invalid - needs an operator
+      if (words.length === 1) {
+        // Just one identifier after WHERE - definitely incomplete
+        // Find this identifier in the original query
+        const fieldName = lastToken.split('.').pop() || lastToken;
+        const fieldInOriginal = this.findFieldInOriginalQuery(originalQuery, whereIndexOriginal, fieldName);
+        const errorLine = fieldInOriginal.line;
+        const errorColumn = fieldInOriginal.column;
+        
+        this.validationErrors.push({
+          message: `Msg 4145, Level 15, State 1, Line ${errorLine}\nAn expression of non-boolean type specified in a context where a condition is expected, near '${fieldName}'.`,
+          line: errorLine,
+          column: errorColumn,
+          severity: 'error'
+        });
+        return true;
+      }
+      
+      // Check if there's an operator in the WHERE clause
+      const hasOperator = operators.some(op => {
+        const opUpper = op.toUpperCase();
+        return upperWhere.includes(opUpper);
+      });
+      
+      // Check for valid patterns that don't need explicit operators
+      const isNullCheck = /IS\s+(NOT\s+)?NULL\s*$/i.test(whereClauseText);
+      const hasInWithParens = /\bIN\s*\([^)]+\)/i.test(whereClauseText);
+      const hasBetween = /\bBETWEEN\s+.+\s+AND\s+/i.test(whereClauseText);
+      
+      // If no operator and no valid pattern, and last token is an identifier, it's likely incomplete
+      if (!hasOperator && !isNullCheck && !hasInWithParens && !hasBetween) {
+        // Check if the last meaningful part is just an identifier
+        // Split by AND/OR to check each condition
+        const conditions = whereClauseText.split(/\s+(AND|OR)\s+/i).filter(c => c && !/^(AND|OR)$/i.test(c));
+        
+        if (conditions.length > 0) {
+          const lastCondition = conditions[conditions.length - 1].trim();
+          
+          // Check if last condition is just an identifier (field name)
+          const cleanLastCondition = lastCondition.replace(/[.,;()]/g, '').trim();
+          if (/^[\w.]+$/.test(cleanLastCondition) && !operators.some(op => cleanLastCondition.toUpperCase().includes(op.toUpperCase()))) {
+            // This is an incomplete condition - just an identifier without operator
+            // Find this field in the original query
+            const fieldName = cleanLastCondition.split('.').pop() || cleanLastCondition;
+            const fieldInOriginal = this.findFieldInOriginalQuery(originalQuery, whereIndexOriginal, fieldName);
+            const errorLine = fieldInOriginal.line;
+            const errorColumn = fieldInOriginal.column;
+            
+            this.validationErrors.push({
+              message: `Msg 4145, Level 15, State 1, Line ${errorLine}\nAn expression of non-boolean type specified in a context where a condition is expected, near '${fieldName}'.`,
+              line: errorLine,
+              column: errorColumn,
+              severity: 'error'
+            });
+            return true;
+          }
+        }
+      }
+    }
+    
+    return false;
+  }
+
+  /**
+   * Escape special regex characters in a string
+   */
+  private escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  /**
+   * Find operator in original query and return line/column info
+   */
+  private findOperatorInOriginalQuery(originalQuery: string, whereIndex: number, operator: string): { line: number; column: number } {
+    // Search for operator in the WHERE clause area of original query
+    const afterWhere = originalQuery.substring(whereIndex);
+    
+    // Try different operator patterns
+    const operatorPatterns = [
+      new RegExp(`\\b${this.escapeRegex(operator)}\\b`, 'gi'),
+      new RegExp(this.escapeRegex(operator), 'gi')
+    ];
+    
+    for (const pattern of operatorPatterns) {
+      const match = afterWhere.match(pattern);
+      if (match && match.index !== undefined) {
+        // Find the LAST occurrence (most likely the incomplete one at the end)
+        let lastMatch: RegExpMatchArray | null = null;
+        let lastIndex = -1;
+        pattern.lastIndex = 0;
+        let currentMatch;
+        
+        while ((currentMatch = pattern.exec(afterWhere)) !== null) {
+          lastMatch = currentMatch;
+          lastIndex = currentMatch.index;
+        }
+        
+        if (lastMatch && lastIndex !== -1) {
+          const absoluteIndex = whereIndex + lastIndex;
+          const line = this.getLineNumber(originalQuery, absoluteIndex);
+          const column = this.getColumnNumber(originalQuery, absoluteIndex, line);
+          return { line, column };
+        }
+        
+        // Use first match if no last match found
+        const absoluteIndex = whereIndex + match.index;
+        const line = this.getLineNumber(originalQuery, absoluteIndex);
+        const column = this.getColumnNumber(originalQuery, absoluteIndex, line);
+        return { line, column };
+      }
+    }
+    
+    // Fallback: return position at WHERE + some offset
+    const line = this.getLineNumber(originalQuery, whereIndex);
+    const column = this.getColumnNumber(originalQuery, whereIndex, line);
+    return { line, column: column + 10 };
+  }
+
+  /**
+   * Find field name in original query and return line/column info
+   */
+  private findFieldInOriginalQuery(originalQuery: string, whereIndex: number, fieldName: string): { line: number; column: number } {
+    // Search for field in the WHERE clause area of original query
+    const afterWhere = originalQuery.substring(whereIndex);
+    
+    // Try to find the field name (case-insensitive, with word boundaries)
+    const fieldPattern = new RegExp(`\\b${this.escapeRegex(fieldName)}\\b`, 'gi');
+    let lastMatch: RegExpMatchArray | null = null;
+    let lastIndex = -1;
+    fieldPattern.lastIndex = 0;
+    let currentMatch;
+    
+    // Find the LAST occurrence (most likely the incomplete one at the end)
+    while ((currentMatch = fieldPattern.exec(afterWhere)) !== null) {
+      lastMatch = currentMatch;
+      lastIndex = currentMatch.index;
+    }
+    
+    if (lastMatch && lastIndex !== -1) {
+      const absoluteIndex = whereIndex + lastIndex;
+      const line = this.getLineNumber(originalQuery, absoluteIndex);
+      const column = this.getColumnNumber(originalQuery, absoluteIndex, line);
+      return { line, column };
+    }
+    
+    // Fallback: return position at WHERE + some offset
+    const line = this.getLineNumber(originalQuery, whereIndex);
+    const column = this.getColumnNumber(originalQuery, whereIndex, line);
+    return { line, column: column + 5 };
+  }
+
+  /**
+   * Update Monaco editor markers to show validation errors with red wavy underlines
+   * Uses node-sql-parser error information to accurately position markers
+   */
+  private updateValidationMarkers(): void {
+    if (!this.editor || this.validationErrors.length === 0) {
+      return;
+    }
+
+    const model = this.editor.getModel();
+    if (!model) {
+      return;
+    }
+
+    // Create markers for each validation error
+    const markers: monaco.editor.IMarkerData[] = this.validationErrors.map(error => {
+      const lineNumber = error.line || 1;
+      let startColumn = error.column || 1;
+      let endColumn = startColumn;
+      
+      // Get the line content to determine token boundaries
+      const lineContent = model.getLineContent(lineNumber);
+      
+      // Try to extract the error token from the error message
+      // Pattern: "near 'TOKEN'" or "near 'TOKEN'."
+      const tokenMatch = error.message.match(/near\s+['"]([^'"]+)['"]/i);
+      if (tokenMatch && tokenMatch[1]) {
+        const token = tokenMatch[1].trim();
+        
+        // Find the token in the line (case-insensitive)
+        const lineUpper = lineContent.toUpperCase();
+        const tokenUpper = token.toUpperCase();
+        
+        // Try to find the token in the line
+        // First try around the error column position
+        let tokenIndex = -1;
+        if (startColumn > 0 && startColumn <= lineContent.length) {
+          // Search near the error position
+          const searchStart = Math.max(0, startColumn - 15);
+          const searchEnd = Math.min(lineContent.length, startColumn + 15);
+          const searchArea = lineUpper.substring(searchStart, searchEnd);
+          const relativeIndex = searchArea.indexOf(tokenUpper);
+          
+          if (relativeIndex !== -1) {
+            tokenIndex = searchStart + relativeIndex;
+          }
+        }
+        
+        // If not found near error position, search entire line
+        if (tokenIndex === -1) {
+          tokenIndex = lineUpper.indexOf(tokenUpper);
+        }
+        
+        if (tokenIndex !== -1) {
+          startColumn = tokenIndex + 1; // Monaco uses 1-based columns
+          endColumn = tokenIndex + token.length + 1;
+        } else {
+          // Token not found in line, use column position and highlight word there
+          startColumn = Math.max(1, Math.min(startColumn, lineContent.length + 1));
+          // Try to find word boundaries at this position
+          const beforePos = Math.max(0, startColumn - 2);
+          const afterPos = Math.min(lineContent.length, startColumn + token.length + 5);
+          const wordContext = lineContent.substring(beforePos, afterPos);
+          
+          // Find word at or near the error position
+          const wordMatch = wordContext.match(/(\S+)/);
+          if (wordMatch && wordMatch.index !== undefined) {
+            const wordStartInContext = beforePos + wordMatch.index;
+            startColumn = wordStartInContext + 1;
+            endColumn = wordStartInContext + wordMatch[1].length + 1;
+          } else {
+            endColumn = startColumn + 1;
+          }
+        }
+      } else {
+        // No token found in error message, highlight word/character at error position
+        if (startColumn > 0 && startColumn <= lineContent.length) {
+          // Find word boundaries around the error column
+          const beforeColumn = Math.max(0, startColumn - 1);
+          const afterColumn = Math.min(lineContent.length, startColumn);
+          
+          // Extract context around error position
+          const beforeText = lineContent.substring(0, beforeColumn);
+          const atText = lineContent.substring(beforeColumn, Math.min(lineContent.length, afterColumn + 20));
+          
+          // Try to find word boundaries
+          const wordStartMatch = beforeText.match(/(\S*)$/);
+          const wordMatch = atText.match(/^(\S+)/);
+          
+          if (wordMatch && wordMatch[1]) {
+            // Calculate word start position
+            const wordStart = wordStartMatch 
+              ? beforeColumn - (wordStartMatch[1]?.length || 0) 
+              : beforeColumn;
+            startColumn = wordStart + 1; // Monaco uses 1-based columns
+            endColumn = wordStart + (wordStartMatch ? (wordStartMatch[1]?.length || 0) : 0) + wordMatch[1].length + 1;
+          } else if (lineContent.length > 0) {
+            // Highlight single character or small token at error position
+            const charAtPos = lineContent[startColumn - 1];
+            if (charAtPos && !charAtPos.trim()) {
+              // If it's whitespace, highlight next non-whitespace character
+              const nextNonSpace = lineContent.substring(startColumn - 1).search(/\S/);
+              if (nextNonSpace !== -1) {
+                startColumn = startColumn + nextNonSpace;
+                endColumn = startColumn + 1;
+              } else {
+                endColumn = startColumn + 1;
+              }
+            } else {
+              // Highlight character at error position
+              startColumn = Math.max(1, Math.min(startColumn, lineContent.length));
+              endColumn = Math.min(startColumn + 1, lineContent.length + 1);
+            }
+          }
+        }
+      }
+      
+      // Ensure columns are within valid range
+      if (lineContent.length > 0) {
+        startColumn = Math.max(1, Math.min(startColumn, lineContent.length + 1));
+        endColumn = Math.max(startColumn, Math.min(endColumn, lineContent.length + 1));
+      } else {
+        startColumn = Math.max(1, startColumn);
+        endColumn = Math.max(startColumn + 1, endColumn);
+      }
+
+      return {
+        severity: error.severity === 'error' 
+          ? monaco.MarkerSeverity.Error 
+          : monaco.MarkerSeverity.Warning,
+        startLineNumber: lineNumber,
+        startColumn: startColumn,
+        endLineNumber: lineNumber,
+        endColumn: endColumn,
+        message: error.message,
+        source: 'SQL Validation',
+        code: 'SQL_SYNTAX_ERROR'
+      };
+    });
+
+    // Set markers on the model - this will show red wavy underlines in Monaco editor
+    monaco.editor.setModelMarkers(model, 'sql-validation', markers);
+  }
+
+  /**
+   * Clear validation markers from Monaco editor
+   */
+  private clearValidationMarkers(): void {
+    if (!this.editor) {
+      return;
+    }
+
+    const model = this.editor.getModel();
+    if (!model) {
+      return;
+    }
+
+    // Clear all markers
+    monaco.editor.setModelMarkers(model, 'sql-validation', []);
   }
 
   private validateSqlStructure(query: string): void {
@@ -1922,7 +2714,7 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
         } else {
           // For complex queries, format to match desired style:
           // SELECT [field1] AS [alias1]
-          // ,[field2] AS [alias2]
+          // ,[field2] AS [alias2] 
           // ,[field3] AS [alias3]
           // FROM ...
           
@@ -2228,6 +3020,8 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
 
+    const executionStartTime = Date.now();
+    
     // Run validation immediately (synchronously) before execution
     this.validateQuery(this.sqlQuery);
     
@@ -2236,28 +3030,66 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
       // Show validation errors panel
       this.showValidationErrors = true;
       
-      // Get error messages
-      const errorMessages = this.validationErrors
+      // Format errors in SQL Server style with execution info
+      const executionEndTime = Date.now();
+      const executionTimeMs = executionEndTime - executionStartTime;
+      const executionTimeSeconds = (executionTimeMs / 1000).toFixed(3);
+      
+      // Get first error line number for the "Started executing query" message
+      const firstErrorLine = this.validationErrors.length > 0 && this.validationErrors[0].line 
+        ? this.validationErrors[0].line 
+        : 1;
+      
+      // Get current time for display
+      const now = new Date();
+      const timeString = now.toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit', 
+        second: '2-digit',
+        hour12: true 
+      });
+      
+      // Format error messages in SQL Server style
+      const formattedErrors: string[] = [];
+      
+      // Add execution start message
+      formattedErrors.push(`${timeString}\nStarted executing query at  Line ${firstErrorLine}`);
+      
+      // Add formatted error messages (already in SQL Server style from validateSqlSyntaxWithParser)
+      this.validationErrors
         .filter(e => e.severity === 'error')
-        .map(e => e.message)
-        .join('; ');
+        .forEach(e => {
+          formattedErrors.push(e.message);
+        });
       
-      if (errorMessages) {
-        this.toastService.error(
-          `SQL Validation Error: ${errorMessages}`,
-          'Validation Failed'
-        );
-      } else {
-        this.toastService.error('Please fix validation errors before executing', 'Validation Error');
-      }
+      // Add execution time in format: 00:00:00.046
+      const hours = Math.floor(executionTimeMs / 3600000);
+      const minutes = Math.floor((executionTimeMs % 3600000) / 60000);
+      const seconds = Math.floor((executionTimeMs % 60000) / 1000);
+      const milliseconds = executionTimeMs % 1000;
+      // Format as HH:mm:ss.SSS (e.g., 00:00:00.046)
+      const timeFormatted = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}.${Math.floor(milliseconds).toString().padStart(3, '0')}`;
+      formattedErrors.push(`Total execution time: ${timeFormatted}`);
       
-      // Scroll to validation errors
-      setTimeout(() => {
-        const errorPanel = document.querySelector('.validation-errors-panel');
-        if (errorPanel) {
-          errorPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-      }, 100);
+      const fullErrorMessage = formattedErrors.join('\n\n');
+      
+      // Display error in the results grid area (where query results are shown)
+      this.queryResults = {
+        success: false,
+        data: [],
+        metadata: {
+          rowCount: 0,
+          executionTime: executionTimeMs / 1000,
+          hasMore: false
+        },
+        error: fullErrorMessage,
+        statusCode: 'SYNTAX_ERROR',
+        totalExecutionTime: executionTimeMs
+      };
+      this.showResults = true;
+      
+      // Also show toast notification
+      this.toastService.error('SQL Syntax Error: Please check the error details below.', 'Validation Failed');
       
       return;
     }
@@ -2325,11 +3157,19 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
         // Clear grid filters, sorts, and groups by emitting empty arrays
         // This ensures the grid component resets its filter/sort/group state
         // Use setTimeout to ensure the grid component is ready to receive the clear signals
+        // IMPORTANT: Only clear if there are existing grid modifications to avoid reformatting the query
         setTimeout(() => {
           this.isExecutingQuery = false; // Allow grid updates after query execution completes
-          this.onGridFilterChange([]);
-          this.onGridSortChange([]);
-          this.onGridGroupChange([]);
+          
+          // Only clear grid filters/sorts/groups if they exist
+          // This prevents unnecessary query reformatting
+          if (this.currentGridFilters.length > 0 || 
+              this.currentGridSorts.length > 0 || 
+              this.currentGridGroups.length > 0) {
+            this.onGridFilterChange([]);
+            this.onGridSortChange([]);
+            this.onGridGroupChange([]);
+          }
         }, 100);
         
         const executionTime = (Date.now() - startTime) / 1000;
@@ -2437,19 +3277,27 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   validateQueryOnly(): void {
-    this.validateQuery(this.sqlQuery);
-    this.showValidationErrors = true;
-    this.validationSuccess = !this.hasValidationErrors && this.validationErrors.length === 0;
-    
-    // Scroll to validation errors if they exist
-    if (this.hasValidationErrors && this.validationErrors.length > 0) {
-      setTimeout(() => {
-        const errorPanel = document.querySelector('.validation-errors-panel');
-        if (errorPanel) {
-          errorPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
-      }, 100);
-    }
+    // Run strict rule-based validation and show JSON result in JSON tab
+    const result: SqlValidationResult = this.sqlValidationService.validate(this.sqlQuery, this.schemaData);
+    const output = {
+      valid: result.valid,
+      errors: result.errors,
+      summary: result.summary,
+      suggestion: result.suggestion
+    };
+
+    // Populate JSON tab
+    this.jsonInput = JSON.stringify(output, null, 2);
+    this.activeTab = 'json';
+
+    // Also reflect errors in the Monaco markers panel for quick navigation
+    this.validationErrors = (result.errors || []).map(err => ({
+      message: err,
+      severity: 'error' as const
+    }));
+    this.hasValidationErrors = this.validationErrors.length > 0;
+    this.validationSuccess = !this.hasValidationErrors;
+    this.updateValidationMarkers();
   }
 
   dismissValidationErrors(): void {
@@ -2508,6 +3356,22 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
       return;
     }
 
+    // Check if there are any grid modifications to apply
+    // If no filters, sorts, or groups, keep the original query exactly as is
+    const hasGridModifications = 
+      (this.currentGridFilters.length > 0) || 
+      (this.currentGridSorts.length > 0) || 
+      (this.currentGridGroups.length > 0);
+
+    // If no grid modifications, don't rebuild the query - keep it exactly as the user wrote it
+    if (!hasGridModifications) {
+      // Ensure originalQuery is set to current query (preserves user's exact formatting)
+      if (!this.originalQuery || this.originalQuery === '') {
+        this.originalQuery = this.sqlQuery;
+      }
+      return; // Don't rebuild query if there are no grid modifications
+    }
+
     // Execute immediately for instant updates
     this.isUpdatingFromGrid = true;
     
@@ -2555,11 +3419,6 @@ export class SqlEditorComponent implements OnInit, AfterViewInit, OnDestroy {
         // Skip the onQueryChange logic that might update originalQuery
         this.detectParameters();
         this.queryChangeSubject.next(this.sqlQuery);
-        
-        // Format query asynchronously to avoid blocking immediate update
-        // setTimeout(() => {
-        //   this.formatQuery();
-        // }, 0);
         
         console.log('SQL updated from grid filters/sorts/groups');
       }

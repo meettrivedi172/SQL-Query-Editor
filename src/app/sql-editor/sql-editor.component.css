@@ -464,6 +464,7 @@
   flex-direction: column;
   align-items: center;
   gap: 16px;
+  width: 100%;
 }
 
 .query-results-error svg {
@@ -480,6 +481,24 @@
   margin: 0;
   color: #9ca3af;
   font-size: 14px;
+}
+
+.query-results-error .error-message-text {
+  margin: 0;
+  color: #9ca3af;
+  font-size: 14px;
+  white-space: pre-wrap;
+  text-align: left;
+  background-color: #1f2937;
+  padding: 16px;
+  border-radius: 8px;
+  border: 1px solid #374151;
+  max-width: 100%;
+  width: 100%;
+  overflow-x: auto;
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  line-height: 1.6;
+  align-self: stretch;
 }
 
 .query-results-header {

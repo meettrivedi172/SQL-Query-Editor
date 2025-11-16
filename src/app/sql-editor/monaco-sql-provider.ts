@@ -190,37 +190,67 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
     const isInGroupBy = recentTextUpper.includes('GROUP BY') && !recentTextUpper.endsWith('GROUP BY');
     
     if (isInWhere || isInOrderBy || isInGroupBy) {
-      // Show table aliases
-      this.aliasToTableMap.forEach((tableName, alias) => {
-        if (word.word === '' || alias.includes(wordLower) || alias.startsWith(wordLower)) {
-          suggestions.push({
-            label: alias,
-            kind: monaco.languages.CompletionItemKind.Variable,
-            documentation: `Table alias for ${tableName}`,
-            insertText: alias,
-            range: range,
-            sortText: '0' + alias
-          });
-        }
-      });
+      // Check if user has typed a table prefix (like "table." or "alias.")
+      // If they typed a dot, the logic above (section 1) already handles showing fields
+      // So here we only show suggestions when NOT after a dot
+      const hasTablePrefix = lastDotIndex > 0 && lastDotIndex >= recentText.length - 20;
       
-      // Show fields from all tables
-      this.aliasToTableMap.forEach((tableName, alias) => {
-        const fields = this.schemaData.get(tableName) || [];
-        fields.forEach(fieldName => {
-          const fieldNameLower = fieldName.toLowerCase();
-          if (word.word === '' || fieldNameLower.startsWith(wordLower) || fieldNameLower.includes(wordLower)) {
+      if (!hasTablePrefix) {
+        // Show table aliases (for users who want to specify table.field)
+        this.aliasToTableMap.forEach((tableName, alias) => {
+          if (word.word === '' || alias.includes(wordLower) || alias.startsWith(wordLower)) {
             suggestions.push({
-              label: `${alias}.${fieldName}`,
-              kind: monaco.languages.CompletionItemKind.Field,
-              documentation: `Field ${fieldName} from ${alias}`,
-              insertText: `${alias}.${fieldName}`,
+              label: alias,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              documentation: `Table alias for ${tableName}`,
+              insertText: alias,
               range: range,
-              sortText: '2' + alias + fieldNameLower
+              sortText: '0' + alias
             });
           }
         });
-      });
+        
+        // Show fields directly without table prefix (default behavior)
+        // Collect all fields from all tables and show them directly
+        const allFields = new Set<string>(); // Use Set to avoid duplicates
+        
+        this.aliasToTableMap.forEach((tableName, alias) => {
+          const fields = this.schemaData.get(tableName) || [];
+          fields.forEach(fieldName => {
+            // Only add if field name doesn't already exist (avoid duplicates)
+            if (!allFields.has(fieldName.toLowerCase())) {
+              allFields.add(fieldName.toLowerCase());
+              
+              const fieldNameLower = fieldName.toLowerCase();
+              if (word.word === '' || fieldNameLower.startsWith(wordLower) || fieldNameLower.includes(wordLower)) {
+                suggestions.push({
+                  label: fieldName,
+                  kind: monaco.languages.CompletionItemKind.Field,
+                  documentation: `Field ${fieldName}`,
+                  insertText: fieldName,
+                  range: range,
+                  sortText: '1' + fieldNameLower
+                });
+              }
+            }
+          });
+        });
+      } else {
+        // User has typed a table prefix, show fields with prefix (handled by section 1 above)
+        // But also show table aliases for completion
+        this.aliasToTableMap.forEach((tableName, alias) => {
+          if (word.word === '' || alias.includes(wordLower) || alias.startsWith(wordLower)) {
+            suggestions.push({
+              label: alias,
+              kind: monaco.languages.CompletionItemKind.Variable,
+              documentation: `Table alias for ${tableName}`,
+              insertText: alias,
+              range: range,
+              sortText: '0' + alias
+            });
+          }
+        });
+      }
     }
     
     // 4. ALWAYS show SQL keywords with partial matching (simple pattern matching)
