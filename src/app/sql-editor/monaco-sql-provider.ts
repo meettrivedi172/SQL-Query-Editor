@@ -50,9 +50,6 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
     position: monaco.Position,
     context: monaco.languages.CompletionContext
   ): monaco.languages.ProviderResult<monaco.languages.CompletionList> {
-    // DEBUG: Log when completion provider is called
-    console.log('[CompletionProvider] Called - Line:', position.lineNumber, 'Col:', position.column, 'Trigger:', context.triggerKind);
-    
     // CRITICAL FIX: Always extract word from current line manually
     // Monaco's getWordAtPosition doesn't work reliably for partial words
     const currentLine = model.getLineContent(position.lineNumber);
@@ -70,7 +67,6 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
         startColumn: matchStart,
         endColumn: position.column
       };
-      console.log('[CompletionProvider] Extracted word from line:', word.word, 'at col', matchStart, '-', position.column);
     } else {
       // No word found, use empty word
       word = {
@@ -78,7 +74,6 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
         startColumn: position.column,
         endColumn: position.column
       };
-      console.log('[CompletionProvider] No word found at cursor');
     }
     
     const range = {
@@ -342,7 +337,6 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
     // CRITICAL FALLBACK: If user typed something but got no suggestions, show keywords anyway
     // This ensures suggestions ALWAYS appear when typing (even for 1 char)
     if (suggestions.length === 0 && word.word.length >= 1) {
-      console.log('[CompletionProvider] No suggestions found, showing keywords for:', word.word);
       const sqlKeywords = this.getSqlKeywords();
       sqlKeywords.forEach(keyword => {
         const keywordLower = keyword.toLowerCase();
@@ -368,8 +362,6 @@ export class SqlCompletionProvider implements monaco.languages.CompletionItemPro
         }
       });
     }
-    
-    console.log('[CompletionProvider] Returning', suggestions.length, 'suggestions');
     
     // Return all suggestions
     return {

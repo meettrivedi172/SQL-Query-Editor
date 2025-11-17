@@ -119,18 +119,15 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
   ) {}
 
   ngOnInit(): void {
-    console.log('ResultsGridComponent ngOnInit - Data:', this.data?.length, 'Columns:', this.columns?.length);
     this.initializeColumns();
     this.processData();
   }
 
   ngAfterViewInit(): void {
-    console.log('ResultsGridComponent ngAfterViewInit - Grid view initialized');
     this.gridInitialized = true;
     // Use requestAnimationFrame for immediate initialization - more efficient than setTimeout
     requestAnimationFrame(() => {
       if (this.data && this.data.length > 0) {
-        console.log('Initializing grid in ngAfterViewInit with', this.data.length, 'rows');
         this.initializeSyncfusionGrid();
       }
       
@@ -174,11 +171,9 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
    */
   initializeSyncfusionGrid(): void {
     if (!this.data || this.data.length === 0) {
-      console.log('No data available for Syncfusion Grid initialization');
       return;
     }
     
-    console.log('Initializing Syncfusion Grid with', this.data.length, 'rows');
     // Update columns first, then data
     this.updateSyncfusionGridColumns();
     
@@ -840,14 +835,11 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
     } else if (event.requestType === 'sorting') {
       this.handleGridSorts();
     } else if (event.requestType === 'grouping') {
-      console.log('Grouping action complete event:', event);
-
       // Use requestAnimationFrame for immediate update while ensuring grid state is ready
       requestAnimationFrame(() => {
         this.handleGridGroups(event);
       });
     } else if (event.requestType === 'ungrouping') {
-      console.log('Ungrouping action complete event:', event);
       // Use requestAnimationFrame for immediate update while ensuring grid state is ready
       requestAnimationFrame(() => {
         this.handleGridGroups(event);
@@ -872,14 +864,12 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
         // Sync the settings
         if (currentGroupSettings && currentGroupSettings.columns) {
           this.gridGroupSettings.columns = [...currentGroupSettings.columns];
-          console.log('Updated groupSettings.columns:', this.gridGroupSettings.columns);
         } else {
           // Try alternative access methods
           const altSettings = (gridInstance as any).getGroupSettings?.() || 
                              (gridInstance as any).groupSettings;
           if (altSettings && altSettings.columns) {
             this.gridGroupSettings.columns = [...altSettings.columns];
-            console.log('Updated groupSettings.columns (alt method):', this.gridGroupSettings.columns);
           }
         }
       }, 10);
@@ -904,7 +894,6 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
           }
           return { ...col };
         });
-        console.log('Column order updated:', this.syncfusionGridColumns.map(col => col.field));
       }
     } catch (error) {
       console.error('Error handling column reorder:', error);
@@ -1089,8 +1078,6 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
   onGridGrouping(event: any): void {
     // Grouping event is being triggered
     // We'll handle it in actionComplete to get final state
-    console.log('Grouping event triggered:', event);
-    console.log('Event structure:', JSON.stringify(event, null, 2));
     
     // Try to get groups directly from the event if available
     if (event && event.columns) {
@@ -1102,7 +1089,6 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
         }
       });
       if (groups.length > 0) {
-        console.log('Groups from event:', groups.map(g => g.field).join(', '));
         this.groupChange.emit(groups);
         // Note: Don't call updateSQL() here - groupChange.emit() already triggers onGridGroupChange() 
         // in parent component which calls updateSQLFromGrid()
@@ -1248,8 +1234,6 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
         groupSettings = this.gridGroupSettings;
       }
 
-      console.log('Group settings object (backup check):', groupSettings);
-
       // Extract groups from the settings and sync with our tracked columns
       if (groupSettings && Array.isArray(groupSettings.columns)) {
         // Clear and rebuild from grid settings
@@ -1292,7 +1276,7 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
             });
           }
         } catch (e) {
-          console.log('getGroupedColumns method not available or error:', e);
+          // getGroupedColumns method not available or error
         }
       }
 
@@ -1327,7 +1311,7 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
             }
           }
         } catch (e) {
-          console.log('Error reading from DOM:', e);
+          // Error reading from DOM
         }
       }
 
@@ -1361,22 +1345,7 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
         }
 
         if (matchedField) {
-          console.log('Using column from event as fallback (grouping action):', matchedField);
           groups.push({ field: matchedField });
-        }
-      }
-
-      console.log('Grid groups found:', groups.length > 0 ? groups.map(g => g.field).join(', ') : 'none');
-
-      // Log group settings structure safely (avoid circular reference)
-      if (groupSettings && groupSettings.columns) {
-        console.log('Group settings columns:', groupSettings.columns);
-        console.log('Group settings columns count:', groupSettings.columns.length);
-        if (Array.isArray(groupSettings.columns)) {
-          console.log('Group settings columns array:', groupSettings.columns.map((col: any) => ({
-            field: typeof col === 'string' ? col : (col.field || col.name || col.columnName),
-            direction: col.direction
-          })));
         }
       }
 
@@ -1402,8 +1371,6 @@ export class ResultsGridComponent implements OnInit, OnChanges, AfterViewInit {
         }
       }
 
-      console.log('Emitting groups:', groups.length > 0 ? groups.map(g => g.field).join(', ') : 'none');
-      console.log('Groups array to emit:', groups);
       this.groupChange.emit(groups);
       // Note: Don't call updateSQL() here - groupChange.emit() already triggers onGridGroupChange() 
       // in parent component which calls updateSQLFromGrid()
