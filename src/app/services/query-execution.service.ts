@@ -84,6 +84,32 @@ export class QueryExecutionService {
     // POST QueryJson to API
     return this.http.post<ApiResponse>(this.apiUrl, queryJson, { headers }).pipe(
       map((response: ApiResponse) => {
+        // Extract error messages from Errors array
+        let errorMessage: string | undefined = undefined;
+        if (response.Errors && Array.isArray(response.Errors) && response.Errors.length > 0) {
+          // Extract error messages from the Errors array
+          // Handle both string errors and object errors
+          const errorMessages = response.Errors.map((err: any) => {
+            if (typeof err === 'string') {
+              return err;
+            } else if (err && typeof err === 'object') {
+              // If error is an object, try to extract message property or stringify it
+              return err.message || err.Message || err.error || err.Error || JSON.stringify(err);
+            }
+            return String(err);
+          }).filter((msg: string) => msg && msg.trim().length > 0);
+          
+          // Join multiple errors with newlines
+          if (errorMessages.length > 0) {
+            errorMessage = errorMessages.join('\n');
+          }
+        }
+        
+        // Also check if IsSuccess is false, even if no Errors array
+        if (!response.IsSuccess && !errorMessage) {
+          errorMessage = `Query execution failed with status code: ${response.StatusCode || 'Unknown'}`;
+        }
+        
         // Transform API response to QueryExecutionResponse format
         return {
           success: response.IsSuccess,
@@ -97,11 +123,26 @@ export class QueryExecutionService {
           recordAffected: response.RecordAffectted,
           totalRecords: response.TotalRecords,
           totalExecutionTime: response.TotalExecutionTime,
-          error: response.Errors && response.Errors.length > 0 ? JSON.stringify(response.Errors) : undefined
+          error: errorMessage
         };
       }),
       catchError((error) => {
         console.error('API Error:', error);
+        // Check if error response has Errors array
+        if (error.error && error.error.Errors && Array.isArray(error.error.Errors) && error.error.Errors.length > 0) {
+          const errorMessages = error.error.Errors.map((err: any) => {
+            if (typeof err === 'string') {
+              return err;
+            } else if (err && typeof err === 'object') {
+              return err.message || err.Message || err.error || err.Error || JSON.stringify(err);
+            }
+            return String(err);
+          }).filter((msg: string) => msg && msg.trim().length > 0);
+          
+          if (errorMessages.length > 0) {
+            return this.handleError(errorMessages.join('\n'));
+          }
+        }
         return this.handleError(error.message || 'Failed to execute query');
       })
     );
