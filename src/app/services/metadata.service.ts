@@ -50,56 +50,6 @@ export interface SchemaData {
   providedIn: 'root'
 })
 export class MetadataService {
-  
-  // Helper to parse DataType string to enum
-  private parseDataType(type: string | number): FieldDataType {
-    if (typeof type === 'string') {
-      const typeMap: { [key: string]: FieldDataType } = {
-        'Int': FieldDataType.Number,
-        'String': FieldDataType.String,
-        'Boolean': FieldDataType.Boolean,
-        'Date': FieldDataType.DateTime,
-        'Decimal': FieldDataType.Decimal,
-        'Text': FieldDataType.Text
-      };
-      return typeMap[type] || FieldDataType.String;
-    }
-    return type as FieldDataType;
-  }
-
-  // Helper to determine if field is lookup
-  private isLookupField(field: any): boolean {
-    const dt = typeof field.FieldType.DataType === 'number' 
-      ? field.FieldType.DataType 
-      : parseInt(field.FieldType.DataType || '0');
-    return dt === 17 || field.LookUpDetails !== null;
-  }
-
-  // Helper to map raw API data to internal format
-  private mapApiDataToSchema(apiData: any): SchemaData {
-    return {
-      appObjects: apiData.map((obj: any) => ({
-        id: obj.ID,
-        name: obj.SystemDBTableName,  // Use SystemDBTableName
-        displayName: obj.DisplayName,
-        type: 'Table' as const,
-        fields: obj.Fields.map((field: any) => ({
-          id: field.ID,
-          name: field.SystemDBFieldName,  // Use SystemDBFieldName
-          displayName: field.DisplayName,
-          dataType: this.parseDataType(field.FieldType.DataType),
-          isPrimaryKey: field.IsPrimaryKey,
-          isRequired: field.IsRequired,
-          isLookup: this.isLookupField(field),
-          lookupDetails: field.LookUpDetails ? {
-            targetObjectName: field.LookUpDetails.LookupObject,
-            targetDisplayField: field.LookUpDetails.DisplayField
-          } : undefined
-        }))
-      }))
-    };
-  }
-
   // Real API data converted to internal format
   private dummySchema: SchemaData;
   
@@ -224025,5 +223975,54 @@ export class MetadataService {
    */
   getQualifiedFieldName(appObjectName: string, fieldName: string): string {
     return `${appObjectName}.${fieldName}`;
+  }
+
+   // Helper to parse DataType string to enum
+  private parseDataType(type: string | number): FieldDataType {
+    if (typeof type === 'string') {
+      const typeMap: { [key: string]: FieldDataType } = {
+        'Int': FieldDataType.Number,
+        'String': FieldDataType.String,
+        'Boolean': FieldDataType.Boolean,
+        'Date': FieldDataType.DateTime,
+        'Decimal': FieldDataType.Decimal,
+        'Text': FieldDataType.Text
+      };
+      return typeMap[type] || FieldDataType.String;
+    }
+    return type as FieldDataType;
+  }
+
+  // Helper to determine if field is lookup
+  private isLookupField(field: any): boolean {
+    const dt = typeof field.FieldType.DataType === 'number' 
+      ? field.FieldType.DataType 
+      : parseInt(field.FieldType.DataType || '0');
+    return dt === 17 || field.LookUpDetails !== null;
+  }
+
+  // Helper to map raw API data to internal format
+  private mapApiDataToSchema(apiData: any): SchemaData {
+    return {
+      appObjects: apiData.map((obj: any) => ({
+        id: obj.ID,
+        name: obj.SystemDBTableName,  // Use SystemDBTableName
+        displayName: obj.DisplayName,
+        type: 'Table' as const,
+        fields: obj.Fields.map((field: any) => ({
+          id: field.ID,
+          name: field.SystemDBFieldName,  // Use SystemDBFieldName
+          displayName: field.DisplayName,
+          dataType: this.parseDataType(field.FieldType.DataType),
+          isPrimaryKey: field.IsPrimaryKey,
+          isRequired: field.IsRequired,
+          isLookup: this.isLookupField(field),
+          lookupDetails: field.LookUpDetails ? {
+            targetObjectName: field.LookUpDetails.LookupObject,
+            targetDisplayField: field.LookUpDetails.DisplayField
+          } : undefined
+        }))
+      }))
+    };
   }
 }
